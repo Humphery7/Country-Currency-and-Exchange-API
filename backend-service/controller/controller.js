@@ -2,7 +2,7 @@ import { getPool } from "../db/connectdb.js";
 import fetch from "node-fetch";
 import fs from 'fs';
 import path from 'path';
-import { Jimp } from 'jimp';
+import { Jimp, loadFont } from 'jimp';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -53,13 +53,12 @@ const refreshCountries = async(req,res)=>{
                 exchange_rate: countryExchangeRate,
                 estimated_gdp: estimatedGDP,
                 flag_url: element.flag || null,
-                last_refreshed_at: new Date().toISOString()
+                last_refreshed_at: Date.now()
             };
         });
     
         const pool = getPool();
         connection = await pool.getConnection();
-
         await connection.query(`
             CREATE TABLE IF NOT EXISTS countries_table (
               id INT AUTO_INCREMENT PRIMARY KEY,
@@ -71,7 +70,7 @@ const refreshCountries = async(req,res)=>{
               exchange_rate DOUBLE,
               estimated_gdp DOUBLE,
               flag_url TEXT,
-              last_refreshed_at DATETIME
+              last_refreshed_at BIGINT
             )
           `);
 
@@ -130,6 +129,26 @@ const getCountriesDB = async(req,res)=>{
         connection = await pool.getConnection();
 
         const { region, currency, sort } = req.query;
+
+        // Validate query params and return 400 on invalid inputs
+        const errors = {};
+        if (region !== undefined && typeof region !== 'string') {
+            errors.region = 'must be a string';
+        }
+        if (currency !== undefined && typeof currency !== 'string') {
+            errors.currency = 'must be a string';
+        }
+        if (sort !== undefined && typeof sort !== 'string') {
+            errors.sort = 'must be a string';
+        }
+        const allowedSort = ['gdp_desc', 'gdp_asc'];
+        if (typeof sort === 'string' && sort.length && !allowedSort.includes(sort)) {
+            errors.sort = `must be one of: ${allowedSort.join(', ')}`;
+        }
+        if (Object.keys(errors).length) {
+            return res.status(400).json({ error: 'Validation failed', details: errors });
+        }
+
         const clauses = [];
         const params = [];
 
@@ -154,7 +173,11 @@ const getCountriesDB = async(req,res)=>{
         }
 
         const [rows] = await connection.query(query, params);
-        res.status(200).json(rows);
+        const formattedRows = rows.map(row => ({
+            ...row,
+            last_refreshed_at: new Date(row.last_refreshed_at).toISOString()
+        }));
+        res.status(200).json(formattedRows);
     }catch(error){
         console.error(error.message);
         res.status(500).json({ error: "Internal server error" });
@@ -226,7 +249,7 @@ const getStatus = async (req,res)=>{
               exchange_rate DOUBLE,
               estimated_gdp DOUBLE,
               flag_url TEXT,
-              last_refreshed_at DATETIME
+              last_refreshed_at BIGINT
             )
         `);
         const [[countRow]] = await connection.query('SELECT COUNT(*) AS total_countries FROM countries_table');
@@ -272,23 +295,67 @@ async function generateSummaryImage(connection){
 
     const width = 800;
     const height = 400;
-    const bgColor = 0x1f2937ff; // gray-800 with full alpha
-    const textColor = 0xffffffff; // white
 
-    const image = new Jimp(width, height, bgColor);
-    const fontTitle = await Jimp.loadFont(Jimp.FONT_SANS_32_WHITE);
-    const fontBody = await Jimp.loadFont(Jimp.FONT_SANS_16_WHITE);
-
-    image.print(fontTitle, 20, 20, 'Country Currency & Exchange Summary');
-    image.print(fontBody, 20, 80, `Total countries: ${countRow.total_countries || 0}`);
-    image.print(fontBody, 20, 110, `Last refresh: ${lastRow.last_refreshed_at ? new Date(lastRow.last_refreshed_at).toISOString() : 'N/A'}`);
-
-    image.print(fontBody, 20, 160, 'Top 5 by estimated GDP:');
-    topRows.forEach((row, idx) => {
-        const y = 190 + idx * 28;
+    const totalText = `Total countries: ${countRow.total_countries || 0}`;
+    const lastText = `Last refresh: ${lastRow.last_refreshed_at ? new Date(lastRow.last_refreshed_at).toISOString() : 'N/A'}`;
+    const topTitle = 'Top 5 by estimated GDP:';
+    const topLines = topRows.map((row, idx) => {
         const gdp = row.estimated_gdp ? Number(row.estimated_gdp).toLocaleString(undefined, { maximumFractionDigits: 2 }) : 'N/A';
-        image.print(fontBody, 40, y, `${idx+1}. ${row.name} — ${gdp}`);
+        return `${idx + 1}. ${row.name} — ${gdp}`;
     });
 
-    await image.writeAsync(SUMMARY_IMAGE_PATH);
+    // Jimp-only rendering with bitmap fonts (no Sharp dependency)
+    const image = new Jimp({ width, height, color: 0x1f2937ff });
+
+    // Robust font resolution across different Jimp package layouts
+    const findExisting = (candidates) => candidates.find(p => fs.existsSync(p));
+    const fontPaths32 = [
+        path.resolve(__dirname, '..', 'node_modules', '@jimp', 'plugin-print', 'fonts', 'open-sans', 'open-sans-32-white', 'open-sans-32-white.fnt'),
+        path.resolve(__dirname, '..', 'node_modules', 'jimp', 'fonts', 'open-sans', 'open-sans-32-white', 'open-sans-32-white.fnt')
+    ];
+    const fontPaths16 = [
+        path.resolve(__dirname, '..', 'node_modules', '@jimp', 'plugin-print', 'fonts', 'open-sans', 'open-sans-16-white', 'open-sans-16-white.fnt'),
+        path.resolve(__dirname, '..', 'node_modules', 'jimp', 'fonts', 'open-sans', 'open-sans-16-white', 'open-sans-16-white.fnt')
+    ];
+
+    const font32Path = findExisting(fontPaths32) || null;
+    const font16Path = findExisting(fontPaths16) || null;
+
+    let fontTitle;
+    let fontBody;
+    try{
+        if (font32Path){
+            fontTitle = await loadFont(font32Path);
+        }else if (font16Path){
+            fontTitle = await loadFont(font16Path);
+        }else{
+            throw new Error('No bitmap fonts found in node_modules');
+        }
+    }catch(e){
+        console.warn('Failed loading title font, using minimal fallback:', e.message);
+        fontTitle = await loadFont(font16Path);
+    }
+
+    try{
+        if (font16Path){
+            fontBody = await loadFont(font16Path);
+        }else{
+            fontBody = fontTitle;
+        }
+    }catch(e){
+        console.warn('Failed loading body font, reusing title font:', e.message);
+        fontBody = fontTitle;
+    }
+
+    image.print({ font: fontTitle, x: 20, y: 20, text: 'Country Currency & Exchange Summary' });
+    image.print({ font: fontBody, x: 20, y: 80, text: totalText });
+    image.print({ font: fontBody, x: 20, y: 110, text: lastText });
+    image.print({ font: fontBody, x: 20, y: 160, text: topTitle });
+    topLines.forEach((t, i) => {
+        image.print({ font: fontBody, x: 40, y: 190 + i * 28, text: t });
+    });
+
+    await image.write(SUMMARY_IMAGE_PATH);
 }
+
+

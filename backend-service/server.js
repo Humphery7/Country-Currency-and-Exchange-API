@@ -1,22 +1,23 @@
 import app from "./app.js";
 import dotenv from "dotenv";
 import {connectDB} from "./db/connectdb.js";
+import cleanEnv from "./utils/utils.js";
 
 dotenv.config();
 
 
-const PORT = process.env.PORT || 3000;
+const PORT = cleanEnv(process.env.PORT) || 3000;
 
 
 const start = async()=>{
 
     try{
         await connectDB({
-            user: process.env.DB_USER,
-            password: process.env.DB_PASSWORD,
-            host: process.env.DB_HOST,
-            database_name: process.env.DB_DATABASE_NAME,
-            port: process.env.DB_PORT,
+            user: cleanEnv(process.env.DB_USER),
+            password: cleanEnv(process.env.DB_PASSWORD),
+            host: cleanEnv(process.env.DB_HOST),
+            database_name: cleanEnv(process.env.DB_DATABASE_NAME),
+            port: cleanEnv(process.env.DB_PORT),
             cert: process.env.DB_CERT
 
         })
