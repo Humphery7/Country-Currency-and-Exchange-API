@@ -202,7 +202,13 @@ const getOneCountry = async (req,res)=>{
         if (!rows.length){
             return res.status(404).json({ error: "Country not found" });
         }
-        res.status(200).json(rows[0]);
+        
+        res.status(200).json({
+            ...rows[0],
+            last_refreshed_at: rows[0].last_refreshed_at
+                ? new Date(rows[0].last_refreshed_at).toISOString()
+                : null
+        });
     }catch(error){
         console.error(error.message);
         res.status(500).json({ error: "Internal server error" });
